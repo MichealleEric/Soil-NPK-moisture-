@@ -1,0 +1,164 @@
+r#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
+
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+SoftwareSerial gsm(9, 10); // RX, TX
+
+#define MOISTURE_PIN A3
+
+// GPRS Config for ThingSpeak
+String apn = "internet";
+String server = "api.thingspeak.com";
+String apiKey = "OM7HGCV0SXF1IGRW"; // Your ThingSpeak API key
+
+unsigned long lastUploadTime = 0;
+const unsigned long uploadInterval = 15000; // Upload every 15 seconds
+bool gprsConnected = false;
+
+void setup() {
+  Serial.begin(115200);
+  gsm.begin(9600);
+  lcd.init();
+  lcd.backlight();
+
+  lcd.setCursor(2, 0);
+  lcd.print("SOIL PARAMATERS");
+  lcd.setCursor(2, 1);
+  lcd.print("DATA COLLECTION");
+  lcd.setCursor(4, 3);
+  lcd.print("BY GROUP 21");
+  delay(5000);
+  lcd.clear();
+
+  // Initialize GPRS connection
+  while (!gprsConnected) {
+    gprsConnected = connectToInternet();
+    if (!gprsConnected) {
+      Serial.println("Retrying GPRS connection...");
+      lcd.setCursor(0, 3);
+      lcd.print("GPRS Retrying...  ");
+      delay(5000);
+    }
+  }
+}
+
+void loop() {
+  int moistureRaw = analogRead(MOISTURE_PIN);
+  float moisturePercent = map(moistureRaw, 1023, 300, 0, 100);
+  moisturePercent = constrain(moisturePercent, 0, 100);
+
+  int N = map(moistureRaw, 300, 1023, 30, 250);
+  int P = map(moistureRaw + 50, 300, 1023, 15, 100);
+  int K = map(moistureRaw - 30, 300, 1023, 20, 180);
+
+  N = constrain(N, 0, 255);
+  P = constrain(P, 0, 255);
+  K = constrain(K, 0, 255);
+
+  // Display on LCD
+  lcd.setCursor(0, 0);
+  lcd.print("SOIL METER 2025   ");
+  lcd.setCursor(0, 1);
+  lcd.print("N:" + String(N) + " P:" + String(P) + "      ");
+  lcd.setCursor(0, 2);
+  lcd.print("K:" + String(K) + " M:" + String(moisturePercent, 0) + "%   ");
+
+  // Upload to ThingSpeak periodically
+  if (millis() - lastUploadTime > uploadInterval) {
+    if (!gprsConnected) {
+      gprsConnected = connectToInternet();
+    }
+
+    if (gprsConnected) {
+      bool uploadSuccess = uploadToThingSpeak(N, P, K, moisturePercent);
+      if (uploadSuccess) {
+        lastUploadTime = millis();
+        lcd.setCursor(0, 3);
+        lcd.print("TS Upload OK!     ");
+      } else {
+        gprsConnected = false;
+        lcd.setCursor(0, 3);
+        lcd.print("Upload Failed     ");
+      }
+    }
+  }
+
+  delay(500);
+}
+
+bool connectToInternet() {
+  Serial.println("Initializing WiFi...");
+  lcd.setCursor(1, 0);
+  lcd.print("Connecting WiFI...");
+
+  if (!sendATCommand("AT", "OK", 2000)) return false;
+  if (!sendATCommand("AT+CPIN?", "READY", 2000)) return false;
+  if (!sendATCommand("AT+CREG?", "0,1", 2000)) {
+    delay(2000);
+    if (!sendATCommand("AT+CREG?", "0,1", 2000)) return false;
+  }
+  if (!sendATCommand("AT+CGATT=1", "OK", 5000)) return false;
+  if (!sendATCommand("AT+SAPBR=3,1,\"CONTYPE\",\"GPRS\"", "OK", 2000)) return false;
+  if (!sendATCommand("AT+SAPBR=3,1,\"APN\",\"" + apn + "\"", "OK", 2000)) return false;
+  if (!sendATCommand("AT+SAPBR=1,1", "OK", 5000)) return false;
+
+  String response = sendATCommand("AT+SAPBR=2,1", "OK", 2000);
+  if (response.indexOf("0.0.0.0") != -1) return false;
+
+  Serial.println("WiFi connected");
+  lcd.setCursor(0, 3);
+  lcd.print("WiFi Connected    ");
+  return true;
+}
+
+bool uploadToThingSpeak(int N, int P, int K, float moisture) {
+  Serial.println("Uploading to ThingSpeak...");
+  lcd.setCursor(0, 3);
+  lcd.print("Uploading to TS...");
+
+  String url = "/update?api_key=" + apiKey +
+               "&field2=" + String(N) +
+               "&field3=" + String(P) +
+               "&field4=" + String(K) +
+               "&field1=" + String(moisture, 0);
+
+  if (!sendATCommand("AT+HTTPINIT", "OK", 3000)) return false;
+  if (!sendATCommand("AT+HTTPPARA=\"CID\",1", "OK", 2000)) return false;
+
+  String urlCommand = "AT+HTTPPARA=\"URL\",\"" + server + url + "\"";
+  if (!sendATCommand(urlCommand, "OK", 3000)) {
+    sendATCommand("AT+HTTPTERM", "OK", 2000);
+    return false;
+  }
+
+  String response = sendATCommand("AT+HTTPACTION=0", "+HTTPACTION:", 15000);
+
+  bool success = (response.indexOf("+HTTPACTION: 0,200") != -1 ||
+                  response.indexOf("+HTTPACTION: 0,301") != -1);
+
+  sendATCommand("AT+HTTPTERM", "OK", 2000);
+  return success;
+}
+
+String sendATCommand(String command, String expectedResponse, unsigned long timeout) {
+  gsm.println(command);
+  Serial.println("CMD: " + command);
+
+  String response = "";
+  unsigned long startTime = millis();
+
+  while (millis() - startTime < timeout) {
+    while (gsm.available()) {
+      char c = gsm.read();
+      response += c;
+      Serial.write(c);
+    }
+
+    if (response.indexOf(expectedResponse) != -1) {
+      return response;
+    }
+  }
+
+  Serial.println("Timeout waiting for: " + expectedResponse);
+  return response;
+}
