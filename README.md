@@ -1,0 +1,1 @@
+The Soil NPK & moisture data collection has both hardware components and software that work together. The hardware is catered for in the circuit diagram pdf and the software in the code. You can study either or both to get a clear picture of how each works. The code sketch is uploaded to the Microcontroller that is shown in the circuit diagram 
